@@ -1,166 +1,272 @@
-# Todo List App Deployment on Kubernetes
+# استقرار برنامه لیست کارها در کوبرنتیس
 
-This repository contains the source code and Kubernetes configuration files to deploy a Todo List application with a Flask backend, a React frontend, and a MySQL database.
+این مخزن شامل کد منبع و فایل‌های پیکربندی کوبرنتیس برای استقرار یک برنامه لیست کارها با بک‌اند Flask، فرانت‌اند React، و پایگاه داده MySQL است.
 
-## Table of Contents
+## فهرست مطالب
 
-- [Prerequisites](#prerequisites)
-- [Getting Started](#getting-started)
-- [Configuration](#configuration)
-- [Cleanup](#cleanup)
+- [پیش‌نیازها](#پیش‌نیازها)
+- [نصب و راه‌اندازی Kind](#نصب-و-راه‌اندازی-kind)
+- [نصب و پیکربندی Ingress در Kind](#نصب-و-پیکربندی-ingress-در-kind)
+- [شروع کار](#شروع-کار)
+- [پیکربندی](#پیکربندی)
+- [پاکسازی](#پاکسازی)
 
-## Prerequisites
+## پیش‌نیازها
 
-Before you begin, ensure you have the following prerequisites installed:
+قبل از شروع، اطمینان حاصل کنید که پیش‌نیازهای زیر را نصب کرده‌اید:
 
-- **Kubernetes Cluster**: You need access to a Kubernetes cluster to deploy this application. You can use a local cluster like Minikube or a cloud-based solution like GKE, EKS, or AKS.
+- **Docker**: برای ساخت ایمیج‌های کانتینر و اجرای Kind به Docker نیاز دارید. می‌توانید آن را از [اینجا](https://www.docker.com/get-started) دانلود کنید.
 
-- **kubectl**: Install the Kubernetes command-line tool `kubectl`. You can find installation instructions [here](https://kubernetes.io/docs/tasks/tools/install-kubectl/).
+- **kubectl**: ابزار خط فرمان کوبرنتیس `kubectl` را نصب کنید. دستورالعمل‌های نصب را می‌توانید [اینجا](https://kubernetes.io/docs/tasks/tools/install-kubectl/) پیدا کنید.
 
-- **Docker**: You need Docker installed on your system to build container images. You can download it [here](https://www.docker.com/get-started).
+- **Kind**: برای راه‌اندازی یک کلاستر کوبرنتیس محلی از Kind (Kubernetes in Docker) استفاده خواهیم کرد.
 
-## Getting Started
+## نصب و راه‌اندازی Kind
 
-1. **Clone this repository:**
+1. **نصب Kind**:
 
+   برای لینوکس یا macOS:
+   ```bash
+   curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+   # یا برای macOS:
+   # curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-darwin-amd64
+   chmod +x ./kind
+   sudo mv ./kind /usr/local/bin/kind
+   ```
+
+   برای ویندوز (با استفاده از Chocolatey):
+   ```bash
+   choco install kind
+   ```
+
+2. **ایجاد کلاستر Kind با پشتیبانی از Ingress**:
+
+   ابتدا یک فایل پیکربندی برای کلاستر Kind ایجاد کنید:
+   ```bash
+   cat > kind-config.yaml << EOF
+   kind: Cluster
+   apiVersion: kind.x-k8s.io/v1alpha4
+   nodes:
+   - role: control-plane
+     kubeadmConfigPatches:
+     - |
+       kind: InitConfiguration
+       nodeRegistration:
+         kubeletExtraArgs:
+           node-labels: "ingress-ready=true"
+     extraPortMappings:
+     - containerPort: 80
+       hostPort: 80
+       protocol: TCP
+     - containerPort: 443
+       hostPort: 443
+       protocol: TCP
+   EOF
+   ```
+
+   سپس با استفاده از این پیکربندی، کلاستر را ایجاد کنید:
+   ```bash
+   kind create cluster --config kind-config.yaml --name todo-app
+   ```
+
+3. **بررسی وضعیت کلاستر**:
+   ```bash
+   kubectl get nodes
+   ```
+   
+   خروجی باید چیزی شبیه به این باشد:
+   ```
+   NAME                    STATUS   ROLES           AGE     VERSION
+   todo-app-control-plane   Ready    control-plane   2m32s   v1.27.3
+   ```
+
+## نصب و پیکربندی Ingress در Kind
+
+1. **نصب NGINX Ingress Controller**:
+   ```bash
+   kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+   ```
+
+2. **منتظر بمانید تا Ingress Controller آماده شود**:
+   ```bash
+   kubectl wait --namespace ingress-nginx \
+     --for=condition=ready pod \
+     --selector=app.kubernetes.io/component=controller \
+     --timeout=90s
+   ```
+
+3. **تست Ingress Controller**:
+   برای اطمینان از کارکرد صحیح Ingress، می‌توانید یک سرویس تست ایجاد کنید:
+   ```bash
+   kubectl apply -f - <<EOF
+   apiVersion: apps/v1
+   kind: Deployment
+   metadata:
+     name: test-app
+   spec:
+     replicas: 1
+     selector:
+       matchLabels:
+         app: test-app
+     template:
+       metadata:
+         labels:
+           app: test-app
+       spec:
+         containers:
+         - name: test-app
+           image: nginx:latest
+           ports:
+           - containerPort: 80
+   ---
+   apiVersion: v1
+   kind: Service
+   metadata:
+     name: test-app
+   spec:
+     ports:
+     - port: 80
+       targetPort: 80
+     selector:
+       app: test-app
+   ---
+   apiVersion: networking.k8s.io/v1
+   kind: Ingress
+   metadata:
+     name: test-app
+   spec:
+     rules:
+     - host: test-app.local
+       http:
+         paths:
+         - path: /
+           pathType: Prefix
+           backend:
+             service:
+               name: test-app
+               port:
+                 number: 80
+   EOF
+   ```
+
+4. **تنظیم فایل hosts**:
+   اضافه کردن خط زیر به فایل `/etc/hosts` (لینوکس/macOS) یا `C:\Windows\System32\drivers\etc\hosts` (ویندوز):
+   ```
+   127.0.0.1 test-app.local to-do-app.local
+   ```
+
+5. **تست Ingress**:
+   در مرورگر خود، آدرس `http://test-app.local` را باز کنید. باید صفحه خوش‌آمدگویی Nginx را مشاهده کنید.
+
+## شروع کار
+
+1. **کلون کردن این مخزن:**
    ```bash
    git clone https://github.com/qxf2/Todo-List-App-Deployment-on-Kubernetes.git
    cd Todo-List-App-Deployment-on-Kubernetes
    ```
 
-2. **Create a secret for MySQL Database:**
-
+2. **ایجاد یک سیکرت برای پایگاه داده MySQL:**
    ```bash
-   kubectl create secret generic db-secret --from-literal=MYSQL_DATABASE=todo_database --from-literal=MYSQL_ROOT_PASSWORD=<db_password> --from-literal=DATABASE_USER=root
+   kubectl create secret generic db-secret --from-literal=MYSQL_DATABASE=todo_database --from-literal=MYSQL_ROOT_PASSWORD=password123 --from-literal=DATABASE_USER=root
    ```
 
-3. **Deploy MySQL:**
-
+3. **استقرار MySQL:**
    ```bash
    kubectl apply -f kubernetes/mysql-deployment.yaml
-   ```
-   This will create a MySQL statefulset deployment and pod. 
-   
-   ```bash
    kubectl apply -f kubernetes/mysql-service.yaml
    ```
-   This will create a MySQL service.
-
-4. **Enter inside MySQL pod and create table in existed database:**
    
-   Check MySQL pod details using following command:
+   منتظر بمانید تا پاد MySQL آماده شود:
    ```bash
-   kubectl get pods
+   kubectl wait --for=condition=ready pod --selector=app=mysql --timeout=120s
    ```
-   Enter inside MySQL pod:
-   ```bash
-   kubectl exec -it <MySQL pod-name for eg. mysql-0> -- /bin/bash 
-   #Login to MySQL
-   mysql -u root -p  #Enter MySQL password to login
-   ```
-   Create a table in existed database:
-   ````bash
-   USE todo_database;
 
+4. **ورود به پاد MySQL و ایجاد جدول در پایگاه داده:**
+   ```bash
+   # نام پاد MySQL را پیدا کنید
+   POD_NAME=$(kubectl get pods -l app=mysql -o jsonpath='{.items[0].metadata.name}')
+   
+   # وارد پاد شوید و جدول را ایجاد کنید
+   kubectl exec -it $POD_NAME -- mysql -u root -ppassword123 -e "
+   USE todo_database;
    CREATE TABLE IF NOT EXISTS task (
         id INT AUTO_INCREMENT PRIMARY KEY,
         title VARCHAR(100) NOT NULL,
         done BOOLEAN DEFAULT FALSE
-    );
-    
-   INSERT INTO task (title, done) VALUES
-        ('Task 1', false),
-        ('Task 2', true);
-
+   );
+   INSERT INTO task (title, done) VALUES ('Task 1', false), ('Task 2', true);
+   SELECT * FROM task;
+   "
    ```
 
-5. **Deploy ConfigMap:**
-    ```bash
-    kubectl apply -f kuberenetes/todo-configmap.yaml
-    ```
+5. **استقرار ConfigMap:**
+   ```bash
+   kubectl apply -f kubernetes/todo-configmap.yml
+   ```
 
-6. **Build Backend Docker Image:**
-    ```bash
-    cd backend/
-    docker build -t todo-backend:latest .
-    ```
+6. **آماده‌سازی و استقرار بک‌اند:**
+   ```bash
+   # ساخت ایمیج Docker بک‌اند
+   cd backend/
+   docker build -t todo-backend:latest .
+   
+   # بارگذاری ایمیج به کلاستر Kind
+   kind load docker-image todo-backend:latest --name todo-app
+   
+   # استقرار بک‌اند
+   cd ..
+   kubectl apply -f kubernetes/backend-deployment.yaml
+   kubectl apply -f kubernetes/backend-service.yaml
+   kubectl apply -f kubernetes/backend-ingress.yaml
+   
+   # منتظر بمانید تا پاد بک‌اند آماده شود
+   kubectl wait --for=condition=ready pod --selector=app=backend --timeout=60s
+   ```
 
-7. **Deploy the Flask Backend:** 
-    ```bash
-    kubectl apply -f kubernetes/backend-deployment.yaml
-    ```
-    This will create backend deployment, replica set and pods.
-    ```bash
-    kubectl apply -f backend-service.yaml
-    ```
-    This will create a backend service. Backend service is configured to NodePort mode as we are deploying it on Minikube. If you are deploying it on any cloud platform, please set service type to LoadBalance.
+7. **آماده‌سازی و استقرار فرانت‌اند:**
+   ```bash
+   # ساخت ایمیج Docker فرانت‌اند
+   cd frontend/
+   docker build -t todo-frontend-react:latest .
+   
+   # بارگذاری ایمیج به کلاستر Kind
+   kind load docker-image todo-frontend-react:latest --name todo-app
+   
+   # استقرار فرانت‌اند
+   cd ..
+   kubectl apply -f kubernetes/frontend-deployment.yaml
+   kubectl apply -f kubernetes/frontend-service.yaml
+   kubectl apply -f kubernetes/frontend-ingress.yaml
+   
+   # منتظر بمانید تا پاد فرانت‌اند آماده شود
+   kubectl wait --for=condition=ready pod --selector=app=frontend --timeout=60s
+   ```
 
-8. **Set Ingress for Flask Backend:**
-    ```bash
-    kubectl apply -f backend-ingress.yaml
-    ```
-    If you are deploying it on Minikube, add an entry to your local `/etc/hosts` file:
+8. **دسترسی به برنامه:**
+   برنامه Todo List اکنون در آدرس‌های زیر در دسترس است:
+   - فرانت‌اند: `http://to-do-app.local`
+   - API بک‌اند: `http://to-do-app.local/tasks`
 
-     ```bash
-     MINIKUBE_IP to-do-app.local
-     ```
-    - You will get minikube ip with following command:
-    ```bash
-    minikube ip
-    ```
-    If you are deploying on cloud, find the external IP of the Ingress controller service:
+   می‌توانید با دستور زیر وضعیت همه منابع را بررسی کنید:
+   ```bash
+   kubectl get all
+   ```
 
-     ```bash
-     kubectl get svc -n ingress-nginx
-     ```
+## پیکربندی
 
-   - Add an entry to your local `/etc/hosts` file:
+- **پیکربندی MySQL**: می‌توانید پیکربندی MySQL را با اصلاح فایل `kubernetes/mysql-deployment.yaml` سفارشی کنید.
+- **پیکربندی بک‌اند**: بک‌اند Flask را با اصلاح `kubernetes/backend-deployment.yaml` پیکربندی کنید.
+- **پیکربندی فرانت‌اند**: فرانت‌اند React را با اصلاح `kubernetes/frontend-deployment.yaml` پیکربندی کنید.
 
-    ```
-    EXTERNAL_IP to-do-app.local
-    ```
-    Now you can access backend servvice at to-do-app.local:5000
+## پاکسازی
 
-9. **Update Frontend Dockerfile:**
-    
-    If you are going to use URL other than to-do-app.local, please update frontend dockerfile environmental variable REACT_APP_API_URL.
-
-10. **Build Frontend Docker Image:**
-    ```bash
-    cd frontend/
-    docker build -t todo-frontend-react:latest .
-    ```
-
-11. **Deploy the React Frontend:** 
-    ```bash
-    kubectl apply -f kubernetes/frontend-deployment.yaml
-    ```
-    This will create frontend deployment, replica set and pods.
-    ```bash
-    kubectl apply -f frontend-service.yaml
-    ```
-    This will create a frontend service. Frontend service is configured to NodePort mode as we are deploying it on Minikube. If you are deploying it on any cloud platform, please set service type to LoadBalance.
-
-12. **Set Ingress for Flask Backend:**
-    ```bash
-    kubectl apply -f frontend-ingress.yaml
-    ```
-
-13. Access the Todo List App:
-    Open your browser and visit `http://todo-app.local` to access the Todo List App.
-
-## Configuration
-
-- **MySQL Configuration**: You can customize MySQL configuration by modifying the `kubernetes/mysql-deployment.yaml` file.
-
-- **Backend Configuration**: Configure the Flask backend by modifying `kubernetes/backend-deployment.yaml`.
-
-- **Frontend Configuration**: Configure the React frontend by modifying the `kubernetes/frontend-deployment.yaml`.
-
-## Cleanup
-
-To delete the deployed resources:
-
+برای حذف منابع مستقر شده:
 ```bash
 kubectl delete -f kubernetes/
+```
+
+برای حذف کلاستر Kind:
+```bash
+kind delete cluster --name todo-app
 ```
